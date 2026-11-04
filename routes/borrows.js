@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { ObjectId } from "mongodb";
 import { getDB } from "../config/db.js";
+import { verifyJWT } from "../middleware/verifyJWT.js";
 
 const router = Router();
 const books = () => getDB().collection("books");
@@ -8,12 +9,15 @@ const borrows = () => getDB().collection("borrows");
 
 const BORROW_DAYS = 14;
 
+router.use(verifyJWT);
+
 // POST /borrows
 router.post("/", async (req, res) => {
-  const { bookId, userName, userEmail } = req.body;
+  const { bookId } = req.body;
+  const { email: userEmail, name: userName } = req.user;
 
-  if (!ObjectId.isValid(bookId) || !userEmail) {
-    return res.status(400).send({ message: "Book and user details are required." });
+  if (!ObjectId.isValid(bookId)) {
+    return res.status(400).send({ message: "A valid book id is required." });
   }
 
   // 1) No double borrow
@@ -62,6 +66,38 @@ router.post("/", async (req, res) => {
     }
     throw err;
   }
+});
+
+// GET /borrows  (only the logged in user's borrows)
+router.get("/", async (req, res) => {
+  const list = await borrows()
+    .find({ userEmail: req.user.email })
+    .sort({ borrowDate: -1 })
+    .toArray();
+  res.send(list);
+});
+
+// DELETE /borrows/:id  (return a book, owner only)
+router.delete("/:id", async (req, res) => {
+  if (!ObjectId.isValid(req.params.id)) {
+    return res.status(400).send({ message: "Invalid borrow id." });
+  }
+  const _id = new ObjectId(req.params.id);
+
+  const borrow = await borrows().findOne({ _id });
+  if (!borrow) return res.status(404).send({ message: "Borrow record not found." });
+  if (borrow.userEmail !== req.user.email) {
+    return res.status(403).send({ message: "Forbidden: this is not your borrow." });
+  }
+
+  await borrows().deleteOne({ _id });
+
+  // give the copy back
+  if (ObjectId.isValid(borrow.bookId)) {
+    await books().updateOne({ _id: new ObjectId(borrow.bookId) }, { $inc: { copies: 1 } });
+  }
+
+  res.send({ message: "Book returned." });
 });
 
 export default router;

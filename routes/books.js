@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { ObjectId } from "mongodb";
 import { getDB } from "../config/db.js";
+import { verifyJWT } from "../middleware/verifyJWT.js";
 
 const router = Router();
 const books = () => getDB().collection("books");
@@ -22,8 +23,8 @@ router.get("/", async (req, res) => {
   res.send(await cursor.toArray());
 });
 
-// GET /books/:id
-router.get("/:id", async (req, res) => {
+// GET /books/:id  (protected)
+router.get("/:id", verifyJWT, async (req, res) => {
   if (!ObjectId.isValid(req.params.id)) {
     return res.status(400).send({ message: "Invalid book id." });
   }
@@ -32,11 +33,11 @@ router.get("/:id", async (req, res) => {
   res.send(book);
 });
 
-// POST /books
-router.post("/", async (req, res) => {
-  const { title, author, category, image, description, copies, userName, userEmail } = req.body;
+// POST /books  (protected)
+router.post("/", verifyJWT, async (req, res) => {
+  const { title, author, category, image, description, copies } = req.body;
 
-  if (!title || !author || !image || !description || !userEmail) {
+  if (!title || !author || !image || !description) {
     return res.status(400).send({ message: "Please fill in all required fields." });
   }
   if (!categories.includes(category)) {
@@ -54,8 +55,8 @@ router.post("/", async (req, res) => {
     image,
     description: description.trim(),
     copies: totalCopies,
-    userName,
-    userEmail,
+    userName: req.user.name, // owner comes from the token, not from the body
+    userEmail: req.user.email,
     createdAt: new Date(),
   };
 
@@ -63,10 +64,17 @@ router.post("/", async (req, res) => {
   res.status(201).send({ ...book, _id: result.insertedId });
 });
 
-// PATCH /books/:id
-router.patch("/:id", async (req, res) => {
+// PATCH /books/:id  (protected, owner only)
+router.patch("/:id", verifyJWT, async (req, res) => {
   if (!ObjectId.isValid(req.params.id)) {
     return res.status(400).send({ message: "Invalid book id." });
+  }
+  const _id = new ObjectId(req.params.id);
+
+  const book = await books().findOne({ _id });
+  if (!book) return res.status(404).send({ message: "Book not found." });
+  if (book.userEmail !== req.user.email) {
+    return res.status(403).send({ message: "Forbidden: you can only edit your own books." });
   }
 
   const allowed = ["title", "author", "category", "image", "description", "copies"];
@@ -74,26 +82,38 @@ router.patch("/:id", async (req, res) => {
   for (const key of allowed) {
     if (req.body[key] !== undefined) updates[key] = req.body[key];
   }
-  if (updates.copies !== undefined) updates.copies = Number(updates.copies);
+  if (updates.category && !categories.includes(updates.category)) {
+    return res.status(400).send({ message: "Invalid category." });
+  }
+  if (updates.copies !== undefined) {
+    updates.copies = Number(updates.copies);
+    if (!Number.isInteger(updates.copies) || updates.copies < 0) {
+      return res.status(400).send({ message: "Copies must be 0 or more." });
+    }
+  }
 
-  const result = await books().findOneAndUpdate(
-    { _id: new ObjectId(req.params.id) },
+  const updated = await books().findOneAndUpdate(
+    { _id },
     { $set: updates },
     { returnDocument: "after" }
   );
-  if (!result) return res.status(404).send({ message: "Book not found." });
-  res.send(result);
+  res.send(updated);
 });
 
-// DELETE /books/:id
-router.delete("/:id", async (req, res) => {
+// DELETE /books/:id  (protected, owner only)
+router.delete("/:id", verifyJWT, async (req, res) => {
   if (!ObjectId.isValid(req.params.id)) {
     return res.status(400).send({ message: "Invalid book id." });
   }
-  const result = await books().deleteOne({ _id: new ObjectId(req.params.id) });
-  if (result.deletedCount === 0) {
-    return res.status(404).send({ message: "Book not found." });
+  const _id = new ObjectId(req.params.id);
+
+  const book = await books().findOne({ _id });
+  if (!book) return res.status(404).send({ message: "Book not found." });
+  if (book.userEmail !== req.user.email) {
+    return res.status(403).send({ message: "Forbidden: you can only delete your own books." });
   }
+
+  await books().deleteOne({ _id });
   res.send({ message: "Book deleted." });
 });
 
